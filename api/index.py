@@ -1,4 +1,17 @@
+"""Worm AI Telegram Bot — Vercel serverless (webhook) version.
 
+Telegram webhook theke update ashle ei FastAPI app seta python-telegram-bot
+diye process kore. Polling version-er sob feature ache, sudhu:
+  - local JSON storage nei (Vercel-er filesystem temporary) — restart/cold
+    start-e user session, cooldown, stats reset hoye jabe.
+  - streaming (word-by-word) animation off — serverless timeout-er moddhe
+    thakar jonno reply direct pathano hoy.
+  - auto-delete timer serverless-e reliably cholbe na (function freeze hoye
+    jay) — code rakha ache, kintu guarantee nei.
+
+Deploy: GitHub repo -> Vercel import -> env vars set -> deploy ->
+Telegram-e setWebhook.
+"""
 import html
 import json
 import logging
@@ -45,10 +58,11 @@ COOLDOWN_SECONDS = 30
 MAX_TELEGRAM_LEN = 4096
 
 # ---- serverless-er jonno tune kora ----
-# Vercel free plan-e function timeout ~10s hote pare, tai API call choto
-# rakha hoyeche ar retry off. Slow hole user-ke bole abar try korte.
-REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "9"))
-MAX_RETRIES = 1
+# API warm thakleo ~7s ney, tai timeout 15s rakha holo jate slow/cold
+# response-eo kete na jay. Fast fail (5xx/connection error) hole 1 bar
+# retry hobe; 429 ele Retry-After mene retry hobe.
+REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "15"))
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", "2"))
 RETRY_BACKOFF_BASE = 2
 
 # ---- forced channel join ----
@@ -200,10 +214,24 @@ def call_worm_ai(query: str, conversation_id: str | None) -> tuple[str, str | No
             resp.raise_for_status()
             break
         except requests.exceptions.HTTPError as e:
-            if e.response is not None and e.response.status_code < 500:
+            status = e.response.status_code if e.response is not None else 0
+            if status == 429:
+                # Rate limited — Retry-After mene (capped) retry koro.
+                retry_after = 2
+                try:
+                    retry_after = int(e.response.headers.get("Retry-After", "2"))
+                except (ValueError, AttributeError):
+                    pass
+                retry_after = max(1, min(retry_after, 8))
+                logger.warning("API 429, retrying after %ds (attempt %d/%d)...",
+                               retry_after, attempt, MAX_RETRIES)
+                last_error = e
+                time.sleep(retry_after)
+                continue
+            if status and status < 500:
                 logger.error("API client error (no retry): %s | body: %s", e, e.response.text[:300])
                 return (
-                    f"⚠️ API error ({e.response.status_code}). API key ba request check koro.",
+                    f"⚠️ API error ({status}). API key ba request check koro.",
                     conversation_id,
                 )
             last_error = e
