@@ -60,10 +60,12 @@ MAX_TELEGRAM_LEN = 4096
 # ---- serverless-er jonno tune kora ----
 # API normal query te 4-15s ney, kintu long Bangla response (golpo ityadi)
 # generate korte 20-30s lage. Tai timeout 45s rakha holo. Timeout hole retry
-# kora hoy na (API slow hole retry-o slow hobe); sudhu fast-fail (5xx /
-# connection error / 429) e retry hoy.
+# kora hoy na (API slow hole retry-o eki slow hobe, Vercel-er 60s limit
+# cross korar risk); kintu fast-fail error (5xx/connection/429) pele 5 bar
+# porjonto retry hobe jate Grok-er intermittent flakiness-e user-ke error
+# dekhte na hoy.
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "45"))
-MAX_RETRIES = int(os.getenv("MAX_RETRIES", "2"))
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", "5"))
 RETRY_BACKOFF_BASE = 2
 
 # ---- forced channel join ----
