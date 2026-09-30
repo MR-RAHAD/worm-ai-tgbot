@@ -54,7 +54,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 API_BASE_URL = os.getenv("WORM_AI_API_URL", "https://worm-ai-xi.vercel.app/api/worm-ai")
 API_KEY = os.getenv("WORM_AI_API_KEY", "")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")  # setWebhook-e deya secret_token
-COOLDOWN_SECONDS = 10
+COOLDOWN_SECONDS = 0
 MAX_TELEGRAM_LEN = 4096
 
 # ---- serverless-er jonno tune kora ----
