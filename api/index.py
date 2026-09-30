@@ -131,7 +131,6 @@ def get_session(user_id: int) -> dict:
         user_sessions[user_id] = {
             "ai_mode": False,
             "last_request": 0.0,
-            "cooldown_warned": False,
             "conversation_id": None,
             "msg_timestamps": [],
             "blocked_until": 0.0,
@@ -789,21 +788,15 @@ async def process_ai_request(update, context, session: dict, prompt: str, group_
     now = time.time()
     elapsed = now - session["last_request"]
     if elapsed < COOLDOWN_SECONDS:
-        if not session.get("cooldown_warned"):
-            # Prothombar cooldown-e porle ekbar warning dao...
-            session["cooldown_warned"] = True
-            remaining = int(COOLDOWN_SECONDS - elapsed) + 1
-            msg = await update.message.reply_text(
-                f"⏳ Ektu wait koro! Abar request korte {remaining}s baki ache."
-            )
-            schedule_delete(msg)
-            return
-        # Warning already deya hoyeche — user-er porer message-e ar
-        # cooldown SMS na diye request ta sathe sathe process koro.
-        session["cooldown_warned"] = False
+        remaining = int(COOLDOWN_SECONDS - elapsed) + 1
+        msg = await update.message.reply_text(
+            f"⏳ Ektu wait koro! Abar request korte {remaining}s baki ache."
+        )
+        schedule_delete(msg)
+        return
 
+    prev_last_request = session["last_request"]
     session["last_request"] = now
-    session["cooldown_warned"] = False
 
     await context.bot.send_chat_action(
         chat_id=update.effective_chat.id, action=ChatAction.TYPING
@@ -815,7 +808,14 @@ async def process_ai_request(update, context, session: dict, prompt: str, group_
     loop = asyncio.get_running_loop()
     answer, conv_id = await loop.run_in_executor(None, call_worm_ai, prompt, current_conv)
 
-    session["last_request"] = time.time()
+    if answer.startswith("⚠️"):
+        # API error hoyeche (jemon "server e connect kora jayni") — user
+        # kono real answer payni, tai cooldown start hobe na. last_request
+        # ager value-te firiye dao jate porer request-e "wait koro" SMS na
+        # diye sathe sathe request neya hoy.
+        session["last_request"] = prev_last_request
+    else:
+        session["last_request"] = time.time()
     if key:
         if conv_id:
             session["group_convs"][key] = conv_id
