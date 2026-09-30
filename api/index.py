@@ -58,11 +58,11 @@ COOLDOWN_SECONDS = 30
 MAX_TELEGRAM_LEN = 4096
 
 # ---- serverless-er jonno tune kora ----
-# API warm thakleo 6-15s ney (kokhono cold start / slow Grok generation-e
-# aro beshi), tai timeout 30s rakha holo jate slow response-eo kete na jay.
-# Fast fail (5xx/connection error) hole 1 bar retry hobe; 429 ele
-# Retry-After mene retry hobe.
-REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))
+# API normal query te 4-15s ney, kintu long Bangla response (golpo ityadi)
+# generate korte 20-30s lage. Tai timeout 45s rakha holo. Timeout hole retry
+# kora hoy na (API slow hole retry-o slow hobe); sudhu fast-fail (5xx /
+# connection error / 429) e retry hoy.
+REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "45"))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "2"))
 RETRY_BACKOFF_BASE = 2
 
@@ -239,6 +239,11 @@ def call_worm_ai(query: str, conversation_id: str | None) -> tuple[str, str | No
         except requests.exceptions.RequestException as e:
             last_error = e
             logger.warning("API request exception (%s): %s", type(e).__name__, e)
+            if isinstance(e, requests.exceptions.Timeout):
+                # API slow hole retry kore lav nai — retry-o eki slow hobe,
+                # ar Vercel-er 60s limit cross korar risk. Direct error dao.
+                logger.error("API timeout after %ds, no retry: %s", REQUEST_TIMEOUT, e)
+                return "⚠️ Worm AI server e connect kora jayni. Ektu pore abar try koro.", conversation_id
 
         if attempt < MAX_RETRIES:
             wait = RETRY_BACKOFF_BASE ** attempt
