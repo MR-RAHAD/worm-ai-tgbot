@@ -68,6 +68,12 @@ REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "45"))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "5"))
 RETRY_BACKOFF_BASE = 2
 
+# ---- auto-restart ----
+# API error/timeout pele bot user-ke abar pathate na bole nijei request
+# ta ekbar notun kore try korbe ("auto restart"). Vercel-er 60s limit-er
+# moddhe thakar jonno restart attempt-e choto timeout thake.
+AUTO_RESTART_TIMEOUT = int(os.getenv("AUTO_RESTART_TIMEOUT", "12"))
+
 # ---- forced channel join ----
 REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "@earning_zone_bangla")
 REQUIRED_CHANNEL_URL = os.getenv("REQUIRED_CHANNEL_URL", "https://t.me/earning_zone_bangla")
@@ -200,6 +206,34 @@ async def flood_guard(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 #  API CALL (blocking -> executor-e chalano hoy)
 # ============================================================
+def _parse_api_payload(data, conversation_id: str | None) -> tuple[str, str | None]:
+    """API JSON payload theke (answer, conversation_id) ber koro."""
+    if isinstance(data, dict):
+        if data.get("status") == "error":
+            msg = data.get("message") or data.get("response") or "Unknown API error."
+            return f"⚠️ {msg}", conversation_id
+
+        answer = data.get("response")
+        if not answer:
+            for key in ("answer", "result", "message", "reply", "text", "data"):
+                if data.get(key):
+                    answer = str(data[key])
+                    break
+        if not answer:
+            answer = str(data)
+
+        new_conv_id = data.get("conversation_id", conversation_id)
+        return str(answer), new_conv_id
+
+    return str(data), conversation_id
+
+
+def _is_retryable_error(answer: str) -> bool:
+    """Auto-restart kora jabe kina. 4xx client error (jemon vul API key)
+    retry kore lav nei — ogulo baad."""
+    return answer.startswith("⚠️") and "API error (4" not in answer[:20]
+
+
 def call_worm_ai(query: str, conversation_id: str | None) -> tuple[str, str | None]:
     params = {"q": f"{SYSTEM_INSTRUCTION}\n\n{query}", "api_key": API_KEY}
     if conversation_id:
@@ -261,24 +295,28 @@ def call_worm_ai(query: str, conversation_id: str | None) -> tuple[str, str | No
     except ValueError:
         return resp.text.strip() or "⚠️ Empty response API theke ashche.", conversation_id
 
-    if isinstance(data, dict):
-        if data.get("status") == "error":
-            msg = data.get("message") or data.get("response") or "Unknown API error."
-            return f"⚠️ {msg}", conversation_id
+    return _parse_api_payload(data, conversation_id)
 
-        answer = data.get("response")
-        if not answer:
-            for key in ("answer", "result", "message", "reply", "text", "data"):
-                if data.get(key):
-                    answer = str(data[key])
-                    break
-        if not answer:
-            answer = str(data)
 
-        new_conv_id = data.get("conversation_id", conversation_id)
-        return str(answer), new_conv_id
-
-    return str(data), conversation_id
+def call_worm_ai_once(
+    query: str, conversation_id: str | None, timeout: int
+) -> tuple[str, str | None]:
+    """Single API attempt — kono retry/backoff nei. Auto-restart-er somoy
+    ekbar quick try korar jonno (Vercel 60s budget-er moddhe thakte)."""
+    params = {"q": f"{SYSTEM_INSTRUCTION}\n\n{query}", "api_key": API_KEY}
+    if conversation_id:
+        params["conversation_id"] = conversation_id
+    try:
+        resp = requests.get(API_BASE_URL, params=params, timeout=timeout)
+        resp.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        logger.warning("Auto-restart attempt failed: %s", e)
+        return "⚠️ Worm AI server e connect kora jayni. Ektu pore abar try koro.", conversation_id
+    try:
+        data = resp.json()
+    except ValueError:
+        return resp.text.strip() or "⚠️ Empty response API theke ashche.", conversation_id
+    return _parse_api_payload(data, conversation_id)
 
 
 # ============================================================
@@ -807,6 +845,20 @@ async def process_ai_request(update, context, session: dict, prompt: str, group_
 
     loop = asyncio.get_running_loop()
     answer, conv_id = await loop.run_in_executor(None, call_worm_ai, prompt, current_conv)
+
+    if _is_retryable_error(answer):
+        # Auto-restart: API error/timeout pele user-ke abar pathate na bole
+        # bot nijei ekbar notun kore try korbe (choto timeout-e, Vercel
+        # 60s limit-er moddhe thakar jonno).
+        logger.warning("API error, auto-restarting request: %s", answer[:80])
+        answer2, conv_id2 = await loop.run_in_executor(
+            None, call_worm_ai_once, prompt, current_conv, AUTO_RESTART_TIMEOUT
+        )
+        if not answer2.startswith("⚠️"):
+            logger.info("Auto-restart succeeded.")
+            answer, conv_id = answer2, conv_id2
+        else:
+            answer = answer2  # latest error tai user-ke dekhao
 
     if answer.startswith("⚠️"):
         # API error hoyeche (jemon "server e connect kora jayni") — user
