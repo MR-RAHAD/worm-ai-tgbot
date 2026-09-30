@@ -128,12 +128,71 @@ chat_settings: dict[int, dict] = {}
 bot_stats: dict[str, int] = {"total_requests": 0}
 
 
+# ============================================================
+#  MONGODB PERSISTENT SESSION STORE
+#  Vercel cold start-e memory muche geleo session MongoDB-te thakbe
+# ============================================================
+_mongo_client = None
+_mongo_db = None
+_mongo_ok = False
+
+def _init_mongo():
+    global _mongo_client, _mongo_db, _mongo_ok
+    uri = os.getenv("MONGODB_URI", "").strip()
+    if not uri:
+        return
+    try:
+        from pymongo import MongoClient
+        _mongo_client = MongoClient(uri, serverSelectionTimeoutMS=5000)
+        _mongo_client.admin.command("ping")
+        _mongo_db = _mongo_client["worm_ai_bot"]
+        _mongo_ok = True
+        logger.info("MongoDB connected: sessions will persist across restarts")
+    except Exception as e:
+        logger.warning("MongoDB connect failed (using memory only): %s", e)
+
+_init_mongo()
+
+def save_session(user_id: int):
+    if not _mongo_ok or user_id not in user_sessions:
+        return
+    try:
+        _mongo_db["sessions"].replace_one(
+            {"user_id": user_id},
+            {"user_id": user_id, "data": user_sessions[user_id], "updated": _now_iso()},
+            upsert=True,
+        )
+    except Exception as e:
+        logger.warning("MongoDB save failed for %s: %s", user_id, e)
+
+def save_all_sessions():
+    if not _mongo_ok:
+        return
+    for uid in list(user_sessions.keys()):
+        save_session(uid)
+
+def _load_session_from_mongo(user_id: int):
+    if not _mongo_ok:
+        return None
+    try:
+        doc = _mongo_db["sessions"].find_one({"user_id": user_id})
+        if doc and isinstance(doc.get("data"), dict):
+            return doc["data"]
+    except Exception as e:
+        logger.warning("MongoDB load failed for %s: %s", user_id, e)
+    return None
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def get_session(user_id: int) -> dict:
     if user_id not in user_sessions:
+        loaded = _load_session_from_mongo(user_id)
+        if loaded:
+            user_sessions[user_id] = loaded
+            return user_sessions[user_id]
         user_sessions[user_id] = {
             "ai_mode": False,
             "last_request": 0.0,
@@ -1032,6 +1091,7 @@ async def telegram_webhook(request: Request):
     data = await request.json()
     update = Update.de_json(data, ptb.bot)
     await ptb.process_update(update)
+    save_all_sessions()
     return {"ok": True}
 
 
