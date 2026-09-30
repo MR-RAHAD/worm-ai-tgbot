@@ -837,21 +837,38 @@ async def process_ai_request(update, context, session: dict, prompt: str, group_
     current_conv = session["group_convs"].get(key) if key else session["conversation_id"]
 
     loop = asyncio.get_running_loop()
-    answer, conv_id = await loop.run_in_executor(None, call_worm_ai, prompt, current_conv)
-
-    if _is_retryable_error(answer):
-        # Auto-restart: API error/timeout pele user-ke abar pathate na bole
-        # bot nijei ekbar notun kore try korbe (choto timeout-e, Vercel
-        # 60s limit-er moddhe thakar jonno).
-        logger.warning("API error, auto-restarting request: %s", answer[:80])
-        answer2, conv_id2 = await loop.run_in_executor(
-            None, call_worm_ai_once, prompt, current_conv, AUTO_RESTART_TIMEOUT
+    t0 = time.time()
+    try:
+        # Vercel 60s limit: call_worm_ai-er vitore retry loop jotoi ghuruk,
+        # 48s-er moddhe beriye asho jate user-ke reply pathanor time thake.
+        # Nahole function kill hoye user kono reply-i pay na.
+        answer, conv_id = await asyncio.wait_for(
+            loop.run_in_executor(None, call_worm_ai, prompt, current_conv),
+            timeout=48,
         )
-        if not answer2.startswith("⚠️"):
-            logger.info("Auto-restart succeeded.")
-            answer, conv_id = answer2, conv_id2
-        else:
-            answer = answer2  # latest error tai user-ke dekhao
+    except asyncio.TimeoutError:
+        logger.warning("call_worm_ai hit 48s budget — replying error instead.")
+        answer = "⚠️ Worm AI server e connect kora jayni. Ektu pore abar try koro."
+        conv_id = current_conv
+    elapsed = time.time() - t0
+
+    # Auto-restart sudhu tokhoni jokhon Vercel budget-e jayga ache —
+    # total API time ~50s-er moddhe rakhte hobe.
+    if _is_retryable_error(answer) and elapsed < 40:
+        restart_timeout = min(AUTO_RESTART_TIMEOUT, int(50 - elapsed))
+        if restart_timeout >= 5:
+            # Auto-restart: API error/timeout pele user-ke abar pathate na
+            # bole bot nijei ekbar notun kore try korbe.
+            logger.warning("API error, auto-restarting (%ds budget): %s",
+                           restart_timeout, answer[:80])
+            answer2, conv_id2 = await loop.run_in_executor(
+                None, call_worm_ai_once, prompt, current_conv, restart_timeout
+            )
+            if not answer2.startswith("⚠️"):
+                logger.info("Auto-restart succeeded.")
+                answer, conv_id = answer2, conv_id2
+            else:
+                answer = answer2  # latest error tai user-ke dekhao
 
     if answer.startswith("⚠️"):
         # API error hoyeche (jemon "server e connect kora jayni") — user
