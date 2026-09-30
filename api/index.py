@@ -61,9 +61,9 @@ MAX_TELEGRAM_LEN = 4096
 # API normal query te 4-15s ney, kintu long Bangla response (golpo ityadi)
 # generate korte 20-30s lage. Tai timeout 45s rakha holo. Timeout hole retry
 # kora hoy na (API slow hole retry-o eki slow hobe, Vercel-er 60s limit
-# cross korar risk); kintu fast-fail error (5xx/connection/429) pele 5 bar
+# cross korar risk); kintu fast-fail error (5xx/connection) pele 5 bar
 # porjonto retry hobe jate Grok-er intermittent flakiness-e user-ke error
-# dekhte na hoy.
+# dekhte na hoy. 429 (rate limit) pele retry hoy na — clear message jay.
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "45"))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "5"))
 RETRY_BACKOFF_BASE = 2
@@ -253,18 +253,11 @@ def call_worm_ai(query: str, conversation_id: str | None) -> tuple[str, str | No
         except requests.exceptions.HTTPError as e:
             status = e.response.status_code if e.response is not None else 0
             if status == 429:
-                # Rate limited — Retry-After mene (capped) retry koro.
-                retry_after = 2
-                try:
-                    retry_after = int(e.response.headers.get("Retry-After", "2"))
-                except (ValueError, AttributeError):
-                    pass
-                retry_after = max(1, min(retry_after, 8))
-                logger.warning("API 429, retrying after %ds (attempt %d/%d)...",
-                               retry_after, attempt, MAX_RETRIES)
-                last_error = e
-                time.sleep(retry_after)
-                continue
+                # Rate limit (2 req/60s per key): backoff retry kore lav nei —
+                # window 60s kintu bot-er budget 45s. Clear message dao jate
+                # user bujhe 1 minute wait korte hobe.
+                logger.warning("API 429 rate limited, not retrying inside attempt.")
+                return "⚠️ Rate limit sesh! 1 minute por abar try koro.", conversation_id
             if status and status < 500:
                 logger.error("API client error (no retry): %s | body: %s", e, e.response.text[:300])
                 return (
