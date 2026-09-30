@@ -2,3 +2,4 @@ fastapi>=0.115
 python-telegram-bot>=21,<23
 requests>=2.32
 python-dotenv>=1.0
+pymongo>=4.0
