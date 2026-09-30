@@ -58,10 +58,11 @@ COOLDOWN_SECONDS = 30
 MAX_TELEGRAM_LEN = 4096
 
 # ---- serverless-er jonno tune kora ----
-# API warm thakleo ~7s ney, tai timeout 15s rakha holo jate slow/cold
-# response-eo kete na jay. Fast fail (5xx/connection error) hole 1 bar
-# retry hobe; 429 ele Retry-After mene retry hobe.
-REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "15"))
+# API warm thakleo 6-15s ney (kokhono cold start / slow Grok generation-e
+# aro beshi), tai timeout 30s rakha holo jate slow response-eo kete na jay.
+# Fast fail (5xx/connection error) hole 1 bar retry hobe; 429 ele
+# Retry-After mene retry hobe.
+REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "2"))
 RETRY_BACKOFF_BASE = 2
 
