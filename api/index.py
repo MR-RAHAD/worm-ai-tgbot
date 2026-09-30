@@ -272,6 +272,10 @@ def call_worm_ai(query: str, conversation_id: str | None) -> tuple[str, str | No
                 # API slow hole retry kore lav nai — retry-o eki slow hobe,
                 # ar Vercel-er 60s limit cross korar risk. Direct error dao.
                 logger.error("API timeout after %ds, no retry: %s", REQUEST_TIMEOUT, e)
+                return "⚠️ Worm AI slow, somoy sesh. Ektu pore abar try koro.", conversation_id
+            if isinstance(e, requests.exceptions.ConnectionError):
+                # DNS fail / connection refused — API-tei pouchano jayni.
+                logger.error("API connection failed, no retry: %s", e)
                 return "⚠️ Worm AI server e connect kora jayni. Ektu pore abar try koro.", conversation_id
 
         if attempt < MAX_RETRIES:
@@ -281,7 +285,7 @@ def call_worm_ai(query: str, conversation_id: str | None) -> tuple[str, str | No
             time.sleep(wait)
     else:
         logger.error("API request failed after %d attempts: %s", MAX_RETRIES, last_error)
-        return "⚠️ Worm AI server e connect kora jayni. Ektu pore abar try koro.", conversation_id
+        return "⚠️ Worm AI server bar bar error dicche. Ektu pore abar try koro.", conversation_id
 
     try:
         data = resp.json()
@@ -848,7 +852,7 @@ async def process_ai_request(update, context, session: dict, prompt: str, group_
         )
     except asyncio.TimeoutError:
         logger.warning("call_worm_ai hit 48s budget — replying error instead.")
-        answer = "⚠️ Worm AI server e connect kora jayni. Ektu pore abar try koro."
+        answer = "⚠️ Worm AI slow, somoy sesh. Ektu pore abar try koro."
         conv_id = current_conv
     elapsed = time.time() - t0
 
