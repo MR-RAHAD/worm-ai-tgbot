@@ -54,7 +54,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 API_BASE_URL = os.getenv("WORM_AI_API_URL", "https://worm-ai-xi.vercel.app/api/worm-ai")
 API_KEY = os.getenv("WORM_AI_API_KEY", "")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")  # setWebhook-e deya secret_token
-COOLDOWN_SECONDS = 0
+COOLDOWN_SECONDS = 30
 MAX_TELEGRAM_LEN = 4096
 
 # ---- serverless-er jonno tune kora ----
@@ -73,6 +73,16 @@ RETRY_BACKOFF_BASE = 2
 # ta ekbar notun kore try korbe ("auto restart"). Vercel-er 60s limit-er
 # moddhe thakar jonno restart attempt-e choto timeout thake.
 AUTO_RESTART_TIMEOUT = int(os.getenv("AUTO_RESTART_TIMEOUT", "12"))
+
+# ---- Pollinations fallback (Grok down/busy hole backup) ----
+# Grok API retryable error dile (5xx / connection / timeout / rate-limit;
+# 4xx client error baad) bot Pollinations API theke backup reply anbe,
+# jate user khali hate na fere. Vercel 60s budget-er moddhe thakte
+# fallback timeout dynamic rakha hoy.
+POLLINATIONS_API_URL = os.getenv("POLLINATIONS_API_URL", "https://pollinations-api.onrender.com")
+POLLINATIONS_API_KEY = os.getenv("POLLINATIONS_API_KEY", "rahad")
+POLLINATIONS_TIMEOUT = int(os.getenv("POLLINATIONS_TIMEOUT", "20"))
+FALLBACK_NOTE = "<i>🔄 Grok ekhon busy — backup AI theke reply:</i>\n\n"
 
 # ---- forced channel join ----
 REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "@earning_zone_bangla")
@@ -128,71 +138,12 @@ chat_settings: dict[int, dict] = {}
 bot_stats: dict[str, int] = {"total_requests": 0}
 
 
-# ============================================================
-#  MONGODB PERSISTENT SESSION STORE
-#  Vercel cold start-e memory muche geleo session MongoDB-te thakbe
-# ============================================================
-_mongo_client = None
-_mongo_db = None
-_mongo_ok = False
-
-def _init_mongo():
-    global _mongo_client, _mongo_db, _mongo_ok
-    uri = os.getenv("MONGODB_URI", "").strip()
-    if not uri:
-        return
-    try:
-        from pymongo import MongoClient
-        _mongo_client = MongoClient(uri, serverSelectionTimeoutMS=5000)
-        _mongo_client.admin.command("ping")
-        _mongo_db = _mongo_client["worm_ai_bot"]
-        _mongo_ok = True
-        logger.info("MongoDB connected: sessions will persist across restarts")
-    except Exception as e:
-        logger.warning("MongoDB connect failed (using memory only): %s", e)
-
-_init_mongo()
-
-def save_session(user_id: int):
-    if not _mongo_ok or user_id not in user_sessions:
-        return
-    try:
-        _mongo_db["sessions"].replace_one(
-            {"user_id": user_id},
-            {"user_id": user_id, "data": user_sessions[user_id], "updated": _now_iso()},
-            upsert=True,
-        )
-    except Exception as e:
-        logger.warning("MongoDB save failed for %s: %s", user_id, e)
-
-def save_all_sessions():
-    if not _mongo_ok:
-        return
-    for uid in list(user_sessions.keys()):
-        save_session(uid)
-
-def _load_session_from_mongo(user_id: int):
-    if not _mongo_ok:
-        return None
-    try:
-        doc = _mongo_db["sessions"].find_one({"user_id": user_id})
-        if doc and isinstance(doc.get("data"), dict):
-            return doc["data"]
-    except Exception as e:
-        logger.warning("MongoDB load failed for %s: %s", user_id, e)
-    return None
-
-
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def get_session(user_id: int) -> dict:
     if user_id not in user_sessions:
-        loaded = _load_session_from_mongo(user_id)
-        if loaded:
-            user_sessions[user_id] = loaded
-            return user_sessions[user_id]
         user_sessions[user_id] = {
             "ai_mode": False,
             "last_request": 0.0,
@@ -373,6 +324,34 @@ def call_worm_ai_once(
     except ValueError:
         return resp.text.strip() or "⚠️ Empty response API theke ashche.", conversation_id
     return _parse_api_payload(data, conversation_id)
+
+
+def call_pollinations_fallback(query: str, timeout: int) -> tuple[str, None]:
+    """Grok down/busy hole Pollinations API theke backup reply ano.
+    Success hole (reply_text, None), fail hole ("⚠️ ...", None)."""
+    url = (POLLINATIONS_API_URL or "").rstrip("/") + "/chat"
+    try:
+        resp = requests.post(
+            url,
+            json={"message": query, "system_prompt": SYSTEM_INSTRUCTION},
+            headers={"x-api-key": POLLINATIONS_API_KEY},
+            timeout=timeout,
+        )
+        if resp.status_code == 401:
+            logger.error("Pollinations fallback: 401 unauthorized — API key check koro.")
+            return "⚠️ Backup AI auth failed.", None
+        resp.raise_for_status()
+        data = resp.json()
+        text = (data.get("response") or "").strip()
+        if not text:
+            logger.warning("Pollinations fallback: khali response ashche.")
+            return "⚠️ Backup AI khali reply dilo.", None
+        return text, None
+    except requests.exceptions.RequestException as e:
+        logger.warning("Pollinations fallback request failed: %s", e)
+        return "⚠️ Backup AI-teo connect kora jayni.", None
+    except ValueError:
+        return "⚠️ Backup AI theke vul response ashche.", None
 
 
 # ============================================================
@@ -933,6 +912,23 @@ async def process_ai_request(update, context, session: dict, prompt: str, group_
             else:
                 answer = answer2  # latest error tai user-ke dekhao
 
+    elapsed = time.time() - t0  # auto-restart-er por budget refresh
+    if _is_retryable_error(answer):
+        # Grok ekhono down/busy — Pollinations fallback try koro.
+        # Vercel 60s limit: 56s-er moddhe sesh korte hobe.
+        fb_budget = int(56 - elapsed)
+        if fb_budget >= 10:
+            fb_timeout = min(POLLINATIONS_TIMEOUT, fb_budget)
+            logger.warning("Grok failed, Pollinations fallback try (%ds): %s",
+                           fb_timeout, answer[:80])
+            fb_answer, _ = await loop.run_in_executor(
+                None, call_pollinations_fallback, prompt, fb_timeout
+            )
+            if not fb_answer.startswith("⚠️"):
+                logger.info("Pollinations fallback succeeded.")
+                answer = FALLBACK_NOTE + fb_answer
+                # fallback-e conversation_id nei — Grok session ager motoi thakbe
+
     if answer.startswith("⚠️"):
         # API error hoyeche (jemon "server e connect kora jayni") — user
         # kono real answer payni, tai cooldown start hobe na. last_request
@@ -1091,7 +1087,6 @@ async def telegram_webhook(request: Request):
     data = await request.json()
     update = Update.de_json(data, ptb.bot)
     await ptb.process_update(update)
-    save_all_sessions()
     return {"ok": True}
 
 
