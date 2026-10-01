@@ -54,7 +54,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 API_BASE_URL = os.getenv("WORM_AI_API_URL", "https://worm-ai-xi.vercel.app/api/worm-ai")
 API_KEY = os.getenv("WORM_AI_API_KEY", "")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")  # setWebhook-e deya secret_token
-COOLDOWN_SECONDS = 30
+COOLDOWN_SECONDS = 0  # per-question cooldown DISABLED per owner request (2026-10-02)
 MAX_TELEGRAM_LEN = 4096
 
 # ---- serverless-er jonno tune kora ----
@@ -374,7 +374,7 @@ def home_text(user, session: dict) -> str:
         "আমি তোমার স্মার্ট AI সহকারী। যেকোনো প্রশ্ন করো, "
         "আমি সুন্দর করে বাংলায় উত্তর দেব ✨\n\n"
         f"📡 <b>AI Mode:</b> {status}\n"
-        f"⏱ <b>Cooldown:</b> {COOLDOWN_SECONDS} সেকেন্ড\n"
+        "⏱ <b>Cooldown:</b> নেই ✅\n"
         f"{DIVIDER}\n"
         "<blockquote>🚀 নিচের বাটন থেকে AI mode চালু করো, "
         "তারপর যা খুশি লিখে পাঠাও।\n"
@@ -404,7 +404,8 @@ def help_text() -> str:
         "▫️ /worm_on ও /worm_off — গ্রুপে চালু/বন্ধ (সবাই পারবে)\n"
         f"{DIVIDER}\n"
         "<blockquote>"
-        f"⏳ প্রতিটি প্রশ্নের পর {COOLDOWN_SECONDS} সেকেন্ড অপেক্ষা করতে হবে।\n"
+        "⚡ প্রশ্নের পর কোনো অপেক্ষা নেই — সাথে সাথে আবার জিজ্ঞেস করো।\n"
+
         "🛡 খুব দ্রুত অনেক মেসেজ পাঠালে সাময়িক ব্লক হতে পারো।\n"
         "📢 প্রাইভেট চ্যাটে AI mode চালু করতে অফিসিয়াল চ্যানেলে জয়েন থাকতে হবে। "
         "গ্রুপে <code>/worm</code> ব্যবহারে কোনো শর্ত নেই।"
