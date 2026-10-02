@@ -612,16 +612,19 @@ async def ensure_joined(update, context, session: dict, group: bool = False) -> 
     return False
 
 
-def format_reply(answer: str, part_label: str = "") -> str:
+def format_reply(answer: str, part_label: str = "", pre_escaped: bool = False) -> str:
+    body = answer if pre_escaped else html.escape(answer)
     return (
         f"🐛 <b>Worm AI{part_label}</b>\n"
         "━━━━━━━━━━━━━━━━━\n"
-        f"{html.escape(answer)}\n"
+        f"{body}\n"
         "━━━━━━━━━━━━━━━━━"
     )
 
 
 def split_text(text: str, limit: int) -> list[str]:
+    """Text-ke limit-er moddhe chunk-e vag koro. HTML entity (&lt; ityadi)
+    majhkhane katbe na — entity shuru howar agei vag hobe."""
     chunks = []
     while len(text) > limit:
         split_at = text.rfind("\n", 0, limit)
@@ -629,8 +632,18 @@ def split_text(text: str, limit: int) -> list[str]:
             split_at = text.rfind(" ", 0, limit)
         if split_at <= 0:
             split_at = limit
-        chunks.append(text[:split_at])
+        # entity majhkhane katle thik koro: sesh '&' (jetar por ';' nei)
+        # thakle okhanei vag koro.
+        amp = text.rfind("&", 0, split_at)
+        if amp > 0 and ";" not in text[amp:split_at]:
+            split_at = amp
+        chunk = text[:split_at]
         text = text[split_at:].lstrip("\n ")
+        if not chunk:
+            # safety guard: khali chunk hole jor kore limit-e kato
+            # (nahole infinite loop hobe)
+            chunk, text = text[:limit], text[limit:].lstrip("\n ")
+        chunks.append(chunk)
     if text:
         chunks.append(text)
     return chunks
@@ -638,16 +651,41 @@ def split_text(text: str, limit: int) -> list[str]:
 
 async def send_ai_reply(update: Update, answer: str):
     """Webhook mode-e reply direct pathano hoy (kono word-by-word animation
-    nei — serverless timeout-er moddhe thakar jonno)."""
+    nei — serverless timeout-er moddhe thakar jonno). Lomb answer hole
+    Telegram-er 4096 char limit-er moddhe vag kore ekadhik message-e
+    pathano hoy — kono ongsho kata hoy na."""
+    is_error = answer.startswith("⚠️")
+    # AGE html-escape koro, TARPOR vag koro. Age vag kore pore escape
+    # korle '<'/'>'/'&' beshi thaka answer (jemon code) escape-er por
+    # 4096 char chariye jeto — Telegram tokhon oi chunk reject kore dito,
+    # ফলে user sudhu prothom ongsho peto (kata mone hoto).
+    escaped = html.escape(answer)
     decoration_overhead = len("🐛 <b>Worm AI (99/99)</b>\n━━━━━━━━━━━━━━━━━\n\n━━━━━━━━━━━━━━━━━")
     content_limit = MAX_TELEGRAM_LEN - decoration_overhead - 50
 
-    raw_chunks = split_text(answer, content_limit)
+    raw_chunks = split_text(escaped, content_limit)
     total = len(raw_chunks)
     for i, chunk in enumerate(raw_chunks, start=1):
         label = f" ({i}/{total})" if total > 1 else ""
-        is_error = chunk.startswith("⚠️")
-        msg = await update.message.reply_html(format_reply(chunk, label))
+        try:
+            msg = await update.message.reply_html(
+                format_reply(chunk, label, pre_escaped=True)
+            )
+        except BadRequest as e:
+            # khub-i rare: tobuo kono chunk reject hole setake ardhek
+            # kore abar try koro jate kichu na haray.
+            logger.warning("Chunk %d/%d send failed (%s), halving and retrying",
+                           i, total, e)
+            for half in split_text(chunk, content_limit // 2) or [chunk]:
+                try:
+                    msg = await update.message.reply_html(
+                        format_reply(half, label, pre_escaped=True)
+                    )
+                    if is_error:
+                        schedule_delete(msg)
+                except TelegramError as e2:
+                    logger.error("Half-chunk send failed, giving up: %s", e2)
+            continue
         if is_error:
             schedule_delete(msg)
 
